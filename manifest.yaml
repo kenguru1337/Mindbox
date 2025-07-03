@@ -1,0 +1,94 @@
+# Основной Deployment для веб-приложения
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  labels:
+    app: web-app
+spec:
+  # Минимум реплик задается через HPA — здесь указываем целевое значение для пиков
+  replicas: 4
+  selector:
+    matchLabels:
+      app: web-app
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1  # Максимум один pod может быть недоступен при обновлении
+      maxSurge: 1        # Один pod создается сверх лимита на время обновления
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      topologySpreadConstraints:
+        # Обеспечиваем равномерное распределение pod’ов по зонам для отказоустойчивости
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: web-app
+      containers:
+        - name: web-app
+          image: your-registry/web-app:latest
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            # requests – базовые ресурсы: чуть выше, чтобы учесть стартовую нагрузку
+            requests:
+              cpu: "200m"
+              memory: "128Mi"
+            # limits – ограничения на пиковое потребление CPU в момент старта
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          lifecycle:
+            preStop:
+              exec:
+                # Даём приложению корректно завершить работу
+                command: ["/bin/sh", "-c", "sleep 5"]
+      terminationGracePeriodSeconds: 10  # Поддержка корректного завершения
+---
+# HorizontalPodAutoscaler – масштабирование в зависимости от дневной нагрузки
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-app-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web-app
+  minReplicas: 1  # Минимум — один pod ночью
+  maxReplicas: 4  # Максимум — на дневной пиковой нагрузке
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50  # Масштабируемся при загрузке >50%
+---
+# PodDisruptionBudget — защищаем от одновременного удаления всех pod’ов
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-app-pdb
+spec:
+  minAvailable: 2  # Гарантируем, что минимум 2 pod’а всегда остаются при обновлениях или drain-операциях
+  selector:
+    matchLabels:
+      app: web-app
